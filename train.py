@@ -8,7 +8,28 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score
 import joblib
 import os
-from src.model import CryptoDataset, TradingNet
+from src.model import CryptoDataset, TransformerTradingNet
+
+def create_sequences(features, targets, seq_len):
+    """
+    Creates sequences of length seq_len from features.
+    Target is the target at the end of the sequence.
+    """
+    xs, ys = [], []
+    # Use stride tricks or simple loop. Loop is safer for now.
+    # We need to predict target at i, using features from i-seq_len to i
+    # So if seq_len=60, first prediction is at index 59 (using 0-59)
+    
+    # Optimization: Use numpy stride tricks for speed
+    num_samples = len(features) - seq_len
+    
+    # Create indices
+    indices = np.arange(num_samples)[:, None] + np.arange(seq_len)[None, :]
+    
+    xs = features[indices]
+    ys = targets[seq_len:]
+    
+    return xs, ys
 
 def train_model():
     # Load Data
@@ -39,12 +60,20 @@ def train_model():
     os.makedirs('model', exist_ok=True)
     joblib.dump(scaler, 'model/scaler.pkl')
     
+    # Create Sequences
+    SEQ_LEN = 60 # 15 hours of context
+    print(f"Creating sequences (SEQ_LEN={SEQ_LEN})...")
+    X_train_seq, y_train_seq = create_sequences(X_train_scaled, y_train, SEQ_LEN)
+    X_test_seq, y_test_seq = create_sequences(X_test_scaled, y_test, SEQ_LEN)
+    
+    print(f"Train shape: {X_train_seq.shape}")
+    
     # Datasets & DataLoaders
-    train_dataset = CryptoDataset(X_train_scaled, y_train)
-    test_dataset = CryptoDataset(X_test_scaled, y_test)
+    train_dataset = CryptoDataset(X_train_seq, y_train_seq)
+    test_dataset = CryptoDataset(X_test_seq, y_test_seq)
     
     # Optimization: Increased batch size and added DataLoader workers
-    batch_size = 16384  # Increased from 2048 to saturate GPU
+    batch_size = 4096 # Reduced slightly from 16k because sequences are larger
     
     # num_workers=4: Parallelize data loading
     # pin_memory=True: Faster host-to-device transfer
@@ -68,7 +97,8 @@ def train_model():
     
     # Model Setup
     input_dim = len(feature_cols)
-    model = TradingNet(input_dim)
+    # Switch to Transformer
+    model = TransformerTradingNet(input_dim, d_model=128, nhead=4, num_layers=4)
     
     # CUDA if available
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

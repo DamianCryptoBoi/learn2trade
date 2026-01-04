@@ -2,8 +2,17 @@ import torch
 import pandas as pd
 import numpy as np
 import joblib
-from src.model import TradingNet
+from src.model import TransformerTradingNet
 import matplotlib.pyplot as plt
+
+def create_sequences(features, seq_len):
+    """
+    Creates sequences of length seq_len from features.
+    """
+    num_samples = len(features) - seq_len
+    indices = np.arange(num_samples)[:, None] + np.arange(seq_len)[None, :]
+    xs = features[indices]
+    return xs
 
 def backtest_model():
     print("Loading test data and model...")
@@ -32,18 +41,42 @@ def backtest_model():
     scaler = joblib.load('model/scaler.pkl')
     X_test_scaled = scaler.transform(X_test)
     
+    # Create Sequences
+    SEQ_LEN = 60
+    X_test_seq = create_sequences(X_test_scaled, SEQ_LEN)
+    
+    # Adjust df to match sequence length (remove first SEQ_LEN rows)
+    df = df.iloc[SEQ_LEN:].reset_index(drop=True)
+    
     # Load Model
     input_dim = len(feature_cols)
-    model = TradingNet(input_dim)
-    model.load_state_dict(torch.load('model/best_model.pth', map_location=torch.device('cpu')))
+    model = TransformerTradingNet(input_dim, d_model=128, nhead=4, num_layers=4)
+    
+    # Check for GPU
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+    
+    model.load_state_dict(torch.load('model/best_model.pth', map_location=device))
+    model.to(device)
     model.eval()
     
     # Get Predictions
-    X_tensor = torch.FloatTensor(X_test_scaled)
-    with torch.no_grad():
-        logits = model(X_tensor)
-        probs = torch.sigmoid(logits).numpy().flatten()
+    # Process in batches to avoid OOM if dataset is huge
+    batch_size = 4096
+    probs = []
     
+    X_tensor = torch.FloatTensor(X_test_seq)
+    num_batches = int(np.ceil(len(X_tensor) / batch_size))
+    
+    print(f"Predicting in {num_batches} batches...")
+    
+    with torch.no_grad():
+        for i in range(num_batches):
+            batch_X = X_tensor[i*batch_size : (i+1)*batch_size].to(device)
+            logits = model(batch_X)
+            batch_probs = torch.sigmoid(logits).cpu().numpy().flatten()
+            probs.extend(batch_probs)
+            
     df['prob'] = probs
     
     # Backtest Loop
