@@ -43,9 +43,28 @@ def train_model():
     train_dataset = CryptoDataset(X_train_scaled, y_train)
     test_dataset = CryptoDataset(X_test_scaled, y_test)
     
-    batch_size = 2048
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    # Optimization: Increased batch size and added DataLoader workers
+    batch_size = 16384  # Increased from 2048 to saturate GPU
+    
+    # num_workers=4: Parallelize data loading
+    # pin_memory=True: Faster host-to-device transfer
+    # persistent_workers=True: Keep workers alive between epochs
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=batch_size, 
+        shuffle=True, 
+        num_workers=4, 
+        pin_memory=True, 
+        persistent_workers=True
+    )
+    test_loader = DataLoader(
+        test_dataset, 
+        batch_size=batch_size, 
+        shuffle=False, 
+        num_workers=4, 
+        pin_memory=True, 
+        persistent_workers=True
+    )
     
     # Model Setup
     input_dim = len(feature_cols)
