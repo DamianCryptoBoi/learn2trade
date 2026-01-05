@@ -4,6 +4,9 @@ import os
 # Set allocator config to avoid fragmentation
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
+# Enable TF32 for faster matrix multiplication on Ampere+ GPUs
+torch.set_float32_matmul_precision('high')
+
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
@@ -68,8 +71,8 @@ def train_model():
     joblib.dump(scaler, 'model/scaler.pkl')
     
     # Create Sequences
-    # H100 Optimization: Increase context window significantly
-    SEQ_LEN = 512 # ~5.3 days of 15m candles
+    # Optimization: Reduced context window for speed
+    SEQ_LEN = 128 # Reduced from 512
     print(f"Creating sequences (SEQ_LEN={SEQ_LEN})...")
     X_train_seq, y_train_seq = create_sequences(X_train_scaled, y_train, SEQ_LEN)
     X_test_seq, y_test_seq = create_sequences(X_test_scaled, y_test, SEQ_LEN)
@@ -80,11 +83,9 @@ def train_model():
     train_dataset = CryptoDataset(X_train_seq, y_train_seq)
     test_dataset = CryptoDataset(X_test_seq, y_test_seq)
     
-    # Optimization: Increased batch size for H100
-    # With larger model and seq_len, we might need to reduce batch size slightly per GPU
-    # Reduced from 4096 to 128 to avoid CUDA OOM, using Gradient Accumulation instead
-    batch_size = 128
-    accumulation_steps = 32 # Effective batch size = 128 * 32 = 4096
+    # Optimization: Increased batch size for faster training
+    batch_size = 1024 # Increased from 128
+    accumulation_steps = 4 # Reduced from 32
     
     # num_workers=8: More workers for faster data feeding
     train_loader = DataLoader(
@@ -106,9 +107,9 @@ def train_model():
     
     # Model Setup
     input_dim = len(feature_cols)
-    # Larger Transformer for H100
-    # d_model=1024, nhead=16, num_layers=12 -> ~150M parameters
-    model = TransformerTradingNet(input_dim, d_model=1024, nhead=16, num_layers=12, dropout=0.1)
+    # Optimization: Smaller Transformer for speed
+    # d_model=128, nhead=4, num_layers=3
+    model = TransformerTradingNet(input_dim, d_model=128, nhead=4, num_layers=3, dropout=0.1)
     
     # CUDA if available
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -179,56 +180,57 @@ def train_model():
             
             # Track total loss (multiply back by accumulation_steps to get actual loss)
             train_loss += loss.item() * accumulation_steps
-            train_loss += loss.item()
             
         avg_train_loss = train_loss / len(train_loader)
         
-        # Validation
-        model.eval()
-        test_loss = 0
-        all_preds = []
-        all_targets = []
-        
-        with torch.no_grad():
-            for batch_features, batch_targets in test_loader:
-                batch_features, batch_targets = batch_features.to(device), batch_targets.to(device)
-                outputs = model(batch_features)
-                loss = criterion(outputs, batch_targets.unsqueeze(1))
-                test_loss += loss.item()
-                
-                # Apply sigmoid for metrics since model returns logits now
-                probs = torch.sigmoid(outputs)
-                preds = (probs > 0.5).float()
-                all_preds.extend(preds.cpu().numpy())
-                all_targets.extend(batch_targets.cpu().numpy())
-        
-        avg_test_loss = test_loss / len(test_loader)
-        
-        # Metrics
-        accuracy = accuracy_score(all_targets, all_preds)
-        precision = precision_score(all_targets, all_preds, zero_division=0)
-        
-        # Time Estimation
-        epoch_end = time.time()
-        epoch_duration = epoch_end - epoch_start
-        total_elapsed = epoch_end - start_time
-        
-        remaining_epochs = epochs - (epoch + 1)
-        estimated_remaining = remaining_epochs * epoch_duration
-        
-        elapsed_str = str(datetime.timedelta(seconds=int(total_elapsed)))
-        eta_str = str(datetime.timedelta(seconds=int(estimated_remaining)))
-        
-        if (epoch + 1) % 10 == 0:
+        # Validation (every 5 epochs)
+        if (epoch + 1) % 5 == 0:
+            model.eval()
+            test_loss = 0
+            all_preds = []
+            all_targets = []
+            
+            with torch.no_grad():
+                for batch_features, batch_targets in test_loader:
+                    batch_features, batch_targets = batch_features.to(device), batch_targets.to(device)
+                    outputs = model(batch_features)
+                    loss = criterion(outputs, batch_targets.unsqueeze(1))
+                    test_loss += loss.item()
+                    
+                    # Apply sigmoid for metrics since model returns logits now
+                    probs = torch.sigmoid(outputs)
+                    preds = (probs > 0.5).float()
+                    all_preds.extend(preds.cpu().numpy())
+                    all_targets.extend(batch_targets.cpu().numpy())
+            
+            avg_test_loss = test_loss / len(test_loader)
+            
+            # Metrics
+            accuracy = accuracy_score(all_targets, all_preds)
+            precision = precision_score(all_targets, all_preds, zero_division=0)
+            
+            # Time Estimation
+            epoch_end = time.time()
+            epoch_duration = epoch_end - epoch_start
+            total_elapsed = epoch_end - start_time
+            
+            remaining_epochs = epochs - (epoch + 1)
+            estimated_remaining = remaining_epochs * epoch_duration
+            
+            elapsed_str = str(datetime.timedelta(seconds=int(total_elapsed)))
+            eta_str = str(datetime.timedelta(seconds=int(estimated_remaining)))
+            
             print(f"Epoch {epoch+1}/{epochs} | Time: {elapsed_str} (ETA: {eta_str}) | Train Loss: {avg_train_loss:.4f} | Test Loss: {avg_test_loss:.4f} | Acc: {accuracy:.4f} | Precision: {precision:.4f}")
-        
-        # Save best model
-        if avg_test_loss < best_loss:
-            best_loss = avg_test_loss
-            # Create model directory if not exists
-            os.makedirs('model', exist_ok=True)
-            torch.save(model.state_dict(), 'model/best_model.pth')
-            print(f"Epoch {epoch+1}: New best model saved! (Loss: {avg_test_loss:.4f})")
+            
+            # Save best model
+            if avg_test_loss < best_loss:
+                best_loss = avg_test_loss
+                # Create model directory if not exists
+                os.makedirs('model', exist_ok=True)
+                torch.save(model.state_dict(), 'model/best_model.pth')
+                print(f"Epoch {epoch+1}: New best model saved! (Loss: {avg_test_loss:.4f})")
+        else:
+             print(f"Epoch {epoch+1}/{epochs} | Train Loss: {avg_train_loss:.4f}")
 
 if __name__ == "__main__":
     train_model()

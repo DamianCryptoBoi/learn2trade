@@ -42,7 +42,7 @@ def backtest_model():
     X_test_scaled = scaler.transform(X_test)
     
     # Create Sequences
-    SEQ_LEN = 512 # Updated to match train.py
+    SEQ_LEN = 128 # Updated to match train.py
     X_test_seq = create_sequences(X_test_scaled, SEQ_LEN)
     
     # Adjust df to match sequence length (remove first SEQ_LEN rows)
@@ -50,8 +50,8 @@ def backtest_model():
     
     # Load Model
     input_dim = len(feature_cols)
-    # Updated architecture to match train.py (H100 config)
-    model = TransformerTradingNet(input_dim, d_model=1024, nhead=16, num_layers=12, dropout=0.1)
+    # Updated architecture to match train.py (Speed config)
+    model = TransformerTradingNet(input_dim, d_model=128, nhead=4, num_layers=3, dropout=0.1)
     
     # Check for GPU
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
