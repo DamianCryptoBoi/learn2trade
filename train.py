@@ -8,6 +8,8 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score
 import joblib
 import os
+import time
+import datetime
 from src.model import CryptoDataset, TransformerTradingNet
 
 def create_sequences(features, targets, seq_len):
@@ -139,7 +141,11 @@ def train_model():
     
     best_loss = float('inf')
     print("Starting training...")
+    
+    start_time = time.time()
+    
     for epoch in range(epochs):
+        epoch_start = time.time()
         model.train()
         train_loss = 0
         
@@ -188,8 +194,19 @@ def train_model():
         accuracy = accuracy_score(all_targets, all_preds)
         precision = precision_score(all_targets, all_preds, zero_division=0)
         
+        # Time Estimation
+        epoch_end = time.time()
+        epoch_duration = epoch_end - epoch_start
+        total_elapsed = epoch_end - start_time
+        
+        remaining_epochs = epochs - (epoch + 1)
+        estimated_remaining = remaining_epochs * epoch_duration
+        
+        elapsed_str = str(datetime.timedelta(seconds=int(total_elapsed)))
+        eta_str = str(datetime.timedelta(seconds=int(estimated_remaining)))
+        
         if (epoch + 1) % 10 == 0:
-            print(f"Epoch {epoch+1}/{epochs} | Train Loss: {avg_train_loss:.4f} | Test Loss: {avg_test_loss:.4f} | Acc: {accuracy:.4f} | Precision: {precision:.4f}")
+            print(f"Epoch {epoch+1}/{epochs} | Time: {elapsed_str} (ETA: {eta_str}) | Train Loss: {avg_train_loss:.4f} | Test Loss: {avg_test_loss:.4f} | Acc: {accuracy:.4f} | Precision: {precision:.4f}")
         
         # Save best model
         if avg_test_loss < best_loss:
