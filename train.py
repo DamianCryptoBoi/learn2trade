@@ -2,7 +2,7 @@ import torch
 import os
 
 # Set allocator config to avoid fragmentation
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
 import torch.nn as nn
 import torch.optim as optim
@@ -139,6 +139,7 @@ def train_model():
         optimizer, 
         max_lr=1e-3, 
         epochs=epochs,
+        steps_per_epoch=len(train_loader)
     )
     
     # Optimization: Mixed Precision Scaler
