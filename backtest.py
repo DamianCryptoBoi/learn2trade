@@ -57,7 +57,16 @@ def backtest_model():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
-    model.load_state_dict(torch.load('model/best_model.pth', map_location=device))
+    # Load state dict and handle torch.compile prefix
+    state_dict = torch.load('model/best_model.pth', map_location=device)
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        if k.startswith('_orig_mod.'):
+            new_state_dict[k[10:]] = v # Remove '_orig_mod.'
+        else:
+            new_state_dict[k] = v
+            
+    model.load_state_dict(new_state_dict)
     model.to(device)
     model.eval()
     
