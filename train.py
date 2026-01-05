@@ -1,4 +1,9 @@
 import torch
+import os
+
+# Set allocator config to avoid fragmentation
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
@@ -77,8 +82,9 @@ def train_model():
     
     # Optimization: Increased batch size for H100
     # With larger model and seq_len, we might need to reduce batch size slightly per GPU
-    # But H100 has 80GB, so 4096 is likely safe.
-    batch_size = 4096 
+    # Reduced from 4096 to 128 to avoid CUDA OOM, using Gradient Accumulation instead
+    batch_size = 128
+    accumulation_steps = 32 # Effective batch size = 128 * 32 = 4096
     
     # num_workers=8: More workers for faster data feeding
     train_loader = DataLoader(
@@ -132,8 +138,7 @@ def train_model():
     scheduler = optim.lr_scheduler.OneCycleLR(
         optimizer, 
         max_lr=1e-3, 
-        epochs=epochs, 
-        steps_per_epoch=len(train_loader)
+        epochs=epochs,
     )
     
     # Optimization: Mixed Precision Scaler
@@ -149,22 +154,30 @@ def train_model():
         model.train()
         train_loss = 0
         
-        for batch_features, batch_targets in train_loader:
+        optimizer.zero_grad()
+        
+        for batch_idx, (batch_features, batch_targets) in enumerate(train_loader):
             batch_features, batch_targets = batch_features.to(device), batch_targets.to(device)
-            
-            optimizer.zero_grad()
             
             # Mixed Precision Context
             with torch.amp.autocast('cuda', enabled=(device.type == 'cuda')):
                 outputs = model(batch_features)
                 loss = criterion(outputs, batch_targets.unsqueeze(1))
+                # Normalize loss for gradient accumulation
+                loss = loss / accumulation_steps
             
             # Scale loss and backward
             scaler_amp.scale(loss).backward()
-            scaler_amp.step(optimizer)
-            scaler_amp.update()
-            scheduler.step()
             
+            # Gradient Accumulation Step
+            if (batch_idx + 1) % accumulation_steps == 0:
+                scaler_amp.step(optimizer)
+                scaler_amp.update()
+                optimizer.zero_grad()
+                scheduler.step()
+            
+            # Track total loss (multiply back by accumulation_steps to get actual loss)
+            train_loss += loss.item() * accumulation_steps
             train_loss += loss.item()
             
         avg_train_loss = train_loss / len(train_loader)
