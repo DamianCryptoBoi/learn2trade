@@ -59,7 +59,7 @@ class PositionalEncoding(nn.Module):
         return x + self.pe[:, :x.size(1)]
 
 class TransformerTradingNet(nn.Module):
-    def __init__(self, input_dim, d_model=256, nhead=8, num_layers=6, dropout=0.1):
+    def __init__(self, input_dim, d_model=1024, nhead=16, num_layers=12, dropout=0.1):
         super(TransformerTradingNet, self).__init__()
         
         # Project input features to d_model dimension
@@ -67,10 +67,11 @@ class TransformerTradingNet(nn.Module):
         self.pos_encoder = PositionalEncoding(d_model)
         
         # Transformer Encoder
+        # dim_feedforward is typically 4 * d_model
         encoder_layers = nn.TransformerEncoderLayer(
             d_model=d_model, 
             nhead=nhead, 
-            dim_feedforward=1024, 
+            dim_feedforward=4 * d_model, 
             dropout=dropout, 
             batch_first=True,
             norm_first=True
@@ -79,12 +80,12 @@ class TransformerTradingNet(nn.Module):
         
         # Output Head
         self.decoder = nn.Sequential(
-            nn.Linear(d_model, 128),
-            nn.ReLU(),
+            nn.Linear(d_model, 512),
+            nn.GELU(), # GELU is standard for modern Transformers
             nn.Dropout(dropout),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, 1)
+            nn.Linear(512, 256),
+            nn.GELU(),
+            nn.Linear(256, 1)
         )
 
     def forward(self, x):

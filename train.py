@@ -61,7 +61,8 @@ def train_model():
     joblib.dump(scaler, 'model/scaler.pkl')
     
     # Create Sequences
-    SEQ_LEN = 60 # 15 hours of context
+    # H100 Optimization: Increase context window significantly
+    SEQ_LEN = 512 # ~5.3 days of 15m candles
     print(f"Creating sequences (SEQ_LEN={SEQ_LEN})...")
     X_train_seq, y_train_seq = create_sequences(X_train_scaled, y_train, SEQ_LEN)
     X_test_seq, y_test_seq = create_sequences(X_test_scaled, y_test, SEQ_LEN)
@@ -72,17 +73,17 @@ def train_model():
     train_dataset = CryptoDataset(X_train_seq, y_train_seq)
     test_dataset = CryptoDataset(X_test_seq, y_test_seq)
     
-    # Optimization: Increased batch size and added DataLoader workers
-    batch_size = 4096 # Reduced slightly from 16k because sequences are larger
+    # Optimization: Increased batch size for H100
+    # With larger model and seq_len, we might need to reduce batch size slightly per GPU
+    # But H100 has 80GB, so 4096 is likely safe.
+    batch_size = 4096 
     
-    # num_workers=4: Parallelize data loading
-    # pin_memory=True: Faster host-to-device transfer
-    # persistent_workers=True: Keep workers alive between epochs
+    # num_workers=8: More workers for faster data feeding
     train_loader = DataLoader(
         train_dataset, 
         batch_size=batch_size, 
         shuffle=True, 
-        num_workers=4, 
+        num_workers=8, 
         pin_memory=True, 
         persistent_workers=True
     )
@@ -90,15 +91,16 @@ def train_model():
         test_dataset, 
         batch_size=batch_size, 
         shuffle=False, 
-        num_workers=4, 
+        num_workers=8, 
         pin_memory=True, 
         persistent_workers=True
     )
     
     # Model Setup
     input_dim = len(feature_cols)
-    # Switch to Transformer
-    model = TransformerTradingNet(input_dim, d_model=128, nhead=4, num_layers=4)
+    # Larger Transformer for H100
+    # d_model=1024, nhead=16, num_layers=12 -> ~150M parameters
+    model = TransformerTradingNet(input_dim, d_model=1024, nhead=16, num_layers=12, dropout=0.1)
     
     # CUDA if available
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -109,13 +111,32 @@ def train_model():
     print(f"Using device: {device}")
     model.to(device)
     
+    # Optimization: Compile model (PyTorch 2.0+)
+    if os.name != 'nt': # torch.compile is not fully supported on Windows yet, but works on Linux (Cloud)
+        print("Compiling model...")
+        model = torch.compile(model)
+    
     # Class weighting
-    # Positive rate ~ 0.37 (from features.py output) -> Neg/Pos ~ 63/37 ~ 1.7
     pos_weight = torch.tensor([1.7]).to(device)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
     
-    epochs = 10000
+    # Optimization: Fused AdamW
+    use_fused = (device.type == 'cuda')
+    optimizer = optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-4, fused=use_fused)
+    
+    epochs = 1000
+    
+    # Optimization: LR Scheduler
+    scheduler = optim.lr_scheduler.OneCycleLR(
+        optimizer, 
+        max_lr=1e-3, 
+        epochs=epochs, 
+        steps_per_epoch=len(train_loader)
+    )
+    
+    # Optimization: Mixed Precision Scaler
+    scaler_amp = torch.amp.GradScaler('cuda', enabled=(device.type == 'cuda'))
+    
     best_loss = float('inf')
     print("Starting training...")
     for epoch in range(epochs):
@@ -126,11 +147,17 @@ def train_model():
             batch_features, batch_targets = batch_features.to(device), batch_targets.to(device)
             
             optimizer.zero_grad()
-            outputs = model(batch_features)
-            loss = criterion(outputs, batch_targets.unsqueeze(1))
             
-            loss.backward()
-            optimizer.step()
+            # Mixed Precision Context
+            with torch.amp.autocast('cuda', enabled=(device.type == 'cuda')):
+                outputs = model(batch_features)
+                loss = criterion(outputs, batch_targets.unsqueeze(1))
+            
+            # Scale loss and backward
+            scaler_amp.scale(loss).backward()
+            scaler_amp.step(optimizer)
+            scaler_amp.update()
+            scheduler.step()
             
             train_loss += loss.item()
             
